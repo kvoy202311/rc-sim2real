@@ -1,0 +1,59 @@
+robot_fsm_node:
+  ros__parameters:
+    policy_slot_names:
+      - policy_1
+      - policy_2
+      - policy_3
+    default_policy: policy_2
+
+    # The three policy slots are fully decoupled.
+    # They currently share the same observation/action definition by default:
+    # - history_steps = 6
+    # - one_step_obs = 45
+    # - action_dim = 12
+    # You can later tune each policy independently without changing the others.
+
+    policy_1.name: policy_1
+    policy_1.path: ""    # /abs/path/to/policy_1.engine
+    policy_1.history_steps: 6
+    policy_1.one_step_obs: 45
+    # Keep policy_1 observation/action baseline aligned with policy_2.
+    # Matches RC_blind_terrain/legged_gym/sim2sim.py DEFAULT_POS
+    policy_1.default_joint_pos: [0.1, 0.8, -1.5, -0.1, 0.8, -1.5, 0.1, 1.0, -1.5, -0.1, 1.0, -1.5]
+    policy_1.action_scale: 0.25
+    policy_1.clip_obs: 100.0
+    policy_1.clip_actions: 100.0
+    policy_1.obs_ang_vel_scale: 0.25
+    policy_1.obs_dof_pos_scale: 1.0
+    policy_1.obs_dof_vel_scale: 0.05
+    policy_1.cmd_lin_vel_scale: 2.0
+    policy_1.cmd_ang_vel_scale: 0.25
+
+    policy_2.name: policy_2
+    policy_2.path: /home/robocon-2026/Desktop/RC2026/kvoy_quadruped/models/policy_2_blind_terrain/policy526.engine
+    policy_2.history_steps: 6
+    policy_2.one_step_obs: 45
+    # Matches RC_blind_terrain/legged_gym/sim2sim.py DEFAULT_POS
+    policy_2.default_joint_pos: [0.0, 0.8, -1.5, -0.0, 0.8, -1.5, 0.0, 1.0, -1.5, -0.0, 1.0, -1.5]
+    policy_2.action_scale: 0.25
+    policy_2.clip_obs: 100.0
+    policy_2.clip_actions: 100.0
+    policy_2.obs_ang_vel_scale: 0.25
+    policy_2.obs_dof_pos_scale: 1.0
+    policy_2.obs_dof_vel_scale: 0.05
+    policy_2.cmd_lin_vel_scale: 2.0
+    policy_2.cmd_ang_vel_scale: 0.25
+
+    policy_3.name: policy_3
+    policy_3.path: ""    # /abs/path/to/policy_3.engine
+    policy_3.history_steps: 6
+    policy_3.one_step_obs: 45
+    policy_3.default_joint_pos: [0.0, 0.8, -1.5, 0.0, 0.8, -1.5, 0.0, 1.0, -1.5, 0.0, 1.0, -1.5]
+    policy_3.action_scale: 0.25
+    policy_3.clip_obs: 100.0
+    policy_3.clip_actions: 100.0
+    policy_3.obs_ang_vel_scale: 0.25
+    policy_3.obs_dof_pos_scale: 1.0
+    policy_3.obs_dof_vel_scale: 0.05
+    policy_3.cmd_lin_vel_scale: 2.0
+    policy_3.cmd_ang_vel_scale: 0.25

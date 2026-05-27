@@ -1,0 +1,19 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>robot_fsm</name>
+  <version>0.1.0</version>
+  <description>Top-level FSM node for kvoy quadruped (WAITING/STANDING/RUNNING/STANDUP/LIEDOWN/ESTOP)</description>
+  <maintainer email="user@todo.todo">user</maintainer>
+  <license>MIT</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <depend>rclcpp</depend>
+  <depend>kvoy_msgs</depend>
+  <depend>robot_kinematics</depend>
+  <depend>rl_controller</depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>

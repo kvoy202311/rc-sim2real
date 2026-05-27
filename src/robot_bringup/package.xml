@@ -1,0 +1,19 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>robot_bringup</name>
+  <version>0.1.0</version>
+  <description>Launch files and configs for kvoy quadruped bringup</description>
+  <maintainer email="user@todo.todo">user</maintainer>
+  <license>MIT</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <exec_depend>serial_comm</exec_depend>
+  <exec_depend>imu_driver</exec_depend>
+  <exec_depend>gamepad_input</exec_depend>
+  <exec_depend>robot_fsm</exec_depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>

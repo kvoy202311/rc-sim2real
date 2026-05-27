@@ -1,0 +1,5 @@
+serial_comm_node:
+  ros__parameters:
+    rx_timeout_ms: 1000
+    debug_serial_io: true
+    debug_serial_hex_bytes: true

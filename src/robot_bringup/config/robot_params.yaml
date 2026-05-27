@@ -1,0 +1,69 @@
+# kvoy quadruped runtime parameters
+# Copy and edit this file, then pass it to the launch file via:
+#   ros2 launch robot_bringup bringup.launch.py
+
+serial_comm_node:
+  ros__parameters:
+    # Stable MCU serial path. This maps to the current 1a86 USB Single Serial device
+    # instead of the unstable /dev/ttyACM0 kernel name.
+    serial_port: /dev/serial/by-id/usb-1a86_USB_Single_Serial_5AF7082020-if00
+    baud_rate: 2000000
+    reconnect_interval_ms: 200
+    rx_timeout_ms: 200
+    # MCU may stream state faster than the ROS control loop needs. Keep the
+    # serial RX parser consuming all frames, but only publish the latest valid
+    # state to ROS at this rate to avoid starving the serial thread.
+    state_publish_rate_hz: 200.0
+    # Joint order:
+    # 0=FL_hip  1=FL_thigh  2=FL_calf
+    # 3=FR_hip  4=FR_thigh  5=FR_calf
+    # 6=RL_hip  7=RL_thigh  8=RL_calf
+    # 9=RR_hip 10=RR_thigh 11=RR_calf
+    # Fill 1 if motor installation direction matches URDF/training convention,
+    # fill -1 if the actual motor direction is reversed.
+    motor_polarity: [1, 1, 1, 1, -1, -1, -1, 1, 1, -1, -1, -1]
+    # Manual runtime zero offset that maps MCU raw encoder zero into URDF zero.
+    # This is the fixed offset applied in serial_comm for both /motor_state and /motor_cmd.
+    motor_zero_offset: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+
+imu_driver_node:
+  ros__parameters:
+    serial_port: /dev/serial/by-id/usb-1a86_USB_Serial-if00-port0
+    baud_rate: 115200        # HWT906 default
+    frame_id: imu_link
+    publish_rate_hz: 200.0
+    reconnect_interval_ms: 500
+
+gamepad_input_node:
+  ros__parameters:
+    publish_rate_hz: 50.0
+
+robot_fsm_node:
+  ros__parameters:
+    stand_transition_pose: [0.0, 1.4, -2.5, 0.0, 1.4, -2.5, 0.0, 1.2, -2.5, 0.0, 1.2, -2.5]
+    stand_pose: [0.0, 0.8, -1.5, -0.0, 0.8, -1.5, 0.0, 1.0, -1.5, -0.0, 1.0, -1.5]
+    lie_transition_pose: [0.0, 1.2, -2.5, 0.0, 1.2, -2.5, 0.0, 1.2, -2.5, 0.0, 1.2, -2.5]
+    lie_pose: [0.0, 1.4, -2.6, 0.0, 1.4, -2.6, 0.0, 1.4, -2.6, 0.0, 1.4, -2.6]
+    rl_control_rate_hz: 50.0
+    action_scale: 0.25
+    clip_obs: 100.0
+    clip_actions: 100.0
+    obs_ang_vel_scale: 0.25
+    obs_dof_pos_scale: 1.0
+    obs_dof_vel_scale: 0.05
+    cmd_lin_vel_scale: 2.0
+    cmd_ang_vel_scale: 0.25
+    # Per-joint hard safety clamp [rad] applied to final RL joint targets before publish.
+    # Keep these aligned with the real robot and URDF joint limits.
+    joint_pos_min: [-1.05, -1.57, -2.72, -1.05, -1.57, -2.72, -1.05, -1.57, -2.72, -1.05, -1.57, -2.72]
+    joint_pos_max: [ 1.05,  3.49,  -0.84,  1.05,  3.49,  -0.84,  1.05,  3.49,  -0.84,  1.05,  3.49,  -0.84]
+    max_imu_age_s: 0.1
+    policy_switch_sound_enabled: false
+    policy_switch_sound_file: ""
+    policy_switch_sound_interval_ms: 150
+    imu_to_body_rotation: [1.0, 0.0, 0.0,
+                           0.0, 1.0, 0.0,
+                           0.0, 0.0, 1.0]
+    standup_duration_s: 5.0
+    liedown_duration_s: 5.0
+    kinematics_control_rate_hz: 50.0
