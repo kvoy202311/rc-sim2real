@@ -4,9 +4,8 @@
 
 serial_comm_node:
   ros__parameters:
-    # Stable MCU serial path. This maps to the current 1a86 USB Single Serial device
-    # instead of the unstable /dev/ttyACM0 kernel name.
-    serial_port: /dev/serial/by-id/usb-1a86_USB_Single_Serial_5AF7082020-if00
+    # Fixed by physical USB port, so replacing the same CH343/MCU adapter does not require editing by-id.
+    serial_port: /dev/serial/by-path/platform-3610000.xhci-usb-0:2.1:1.0
     baud_rate: 2000000
     reconnect_interval_ms: 200
     rx_timeout_ms: 200
@@ -25,10 +24,24 @@ serial_comm_node:
     # Manual runtime zero offset that maps MCU raw encoder zero into URDF zero.
     # This is the fixed offset applied in serial_comm for both /motor_state and /motor_cmd.
     motor_zero_offset: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    # First-order low-pass filter for outgoing joint position targets before MCU TX.
+    # filtered = alpha * target + (1 - alpha) * previous_filtered.
+    # 1.0 disables filtering; lower values smooth more but add more lag.
+    motor_cmd_position_filter_alpha: 1.0
+    # Extra damping velocity target added before MCU TX:
+    # velocity_target += clamp(-gain * measured_joint_velocity, +/-max_rad_s).
+    # Requires the MCU motor controller to use the velocity target term.
+    motor_cmd_velocity_damping_gain: 0.0
+    motor_cmd_velocity_damping_max_rad_s: 1.0
+    # First-order low-pass filters for /motor_state observations after URDF conversion.
+    # 1.0 disables filtering; lower values smooth more but add more observation lag.
+    motor_state_position_filter_alpha: 1.0
+    motor_state_velocity_filter_alpha: 0.8
 
 imu_driver_node:
   ros__parameters:
-    serial_port: /dev/serial/by-id/usb-1a86_USB_Serial-if00-port0
+    # Fixed by physical USB port, so replacing the same IMU model does not require editing by-id.
+    serial_port: /dev/serial/by-path/platform-3610000.xhci-usb-0:2.2:1.0-port0
     baud_rate: 115200        # HWT906 default
     frame_id: imu_link
     publish_rate_hz: 200.0
@@ -37,13 +50,26 @@ imu_driver_node:
 gamepad_input_node:
   ros__parameters:
     publish_rate_hz: 50.0
+    vx_max_mps: 0.8
+    vy_max_mps: 0.5
+    yaw_rate_max_rad_s: 2.5
+    stick_deadzone: 0.1
+    digital_axis_threshold: 0.5
+    policy_switch_long_press_s: 1.0
+    # 手柄/接收器开机枚举可能比 bringup 慢；没检测到时按这个间隔自动重试打开。
+    # Retry opening the joystick at this interval if it is not ready at boot.
+    joystick_reconnect_interval_s: 1.0
+    # -1 表示自动选择；优先选择名称包含 preferred_joystick_name_substring 的手柄。
+    # -1 means auto-select; prefer a joystick whose name contains this substring.
+    joystick_index: -1
+    preferred_joystick_name_substring: "GameSir"
 
 robot_fsm_node:
   ros__parameters:
-    stand_transition_pose: [0.0, 1.4, -2.5, 0.0, 1.4, -2.5, 0.0, 1.2, -2.5, 0.0, 1.2, -2.5]
-    stand_pose: [0.0, 0.8, -1.5, -0.0, 0.8, -1.5, 0.0, 1.0, -1.5, -0.0, 1.0, -1.5]
-    lie_transition_pose: [0.0, 1.2, -2.5, 0.0, 1.2, -2.5, 0.0, 1.2, -2.5, 0.0, 1.2, -2.5]
-    lie_pose: [0.0, 1.4, -2.6, 0.0, 1.4, -2.6, 0.0, 1.4, -2.6, 0.0, 1.4, -2.6]
+    stand_transition_pose: [0.1, 1.4, -2.5, -0.1, 1.4, -2.5, 0.1, 1.2, -2.5, -0.1, 1.2, -2.5]
+    stand_pose: [0.1, 0.8, -1.5, -0.1, 0.8, -1.5, 0.1, 1.0, -1.5, -0.1, 1.0, -1.5]
+    lie_transition_pose: [0.1, 1.2, -2.5, 0.1, 1.2, -2.5, 0.1, 1.2, -2.5, 0.1, 1.2, -2.5]
+    lie_pose: [0.1, 1.4, -2.6, 0.1, 1.4, -2.6, 0.1, 1.4, -2.6, 0.1, 1.4, -2.6]
     rl_control_rate_hz: 50.0
     action_scale: 0.25
     clip_obs: 100.0
@@ -53,6 +79,22 @@ robot_fsm_node:
     obs_dof_vel_scale: 0.05
     cmd_lin_vel_scale: 2.0
     cmd_ang_vel_scale: 0.25
+    # Height command for policy_1 only. D-pad up/down changes height only when
+    # vx/vy/yaw command is near zero. Observation uses height * policy cmd_height_scale.
+    height_command_min_m: 0.05
+    height_command_max_m: 0.28
+    height_command_default_m: 0.26
+    height_command_step_m: 0.03
+    height_command_zero_cmd_threshold: 0.05 #速度命令小于一定值
+    # Right stick is deployed as a continuous yaw-rate command.
+    # For legged_gym-style heading training, the policy still observes the derived yaw-rate command.
+    yaw_command_mode: rate
+    heading_command_error_gain: 1.0
+    heading_command_max_yaw_rate_rad_s: 2.5
+    # First-order low-pass filters for IMU observations used by RL.
+    # 1.0 disables filtering; lower values smooth more but add more observation lag.
+    imu_ang_vel_filter_alpha: 1.0 #角速度噪声，一般更容易导致抖动
+    imu_projected_gravity_filter_alpha: 1.0 #重力方向噪声
     # Per-joint hard safety clamp [rad] applied to final RL joint targets before publish.
     # Keep these aligned with the real robot and URDF joint limits.
     joint_pos_min: [-1.05, -1.57, -2.72, -1.05, -1.57, -2.72, -1.05, -1.57, -2.72, -1.05, -1.57, -2.72]
@@ -64,6 +106,80 @@ robot_fsm_node:
     imu_to_body_rotation: [1.0, 0.0, 0.0,
                            0.0, 1.0, 0.0,
                            0.0, 0.0, 1.0]
-    standup_duration_s: 5.0
-    liedown_duration_s: 5.0
+    standup_duration_s: 2.
+    liedown_duration_s: 2.
     kinematics_control_rate_hz: 50.0
+
+bringup_restart_supervisor:
+  ros__parameters:
+    # 是否启用“手柄触发重启 bringup 服务”的辅助节点。
+    # Whether the gamepad-triggered restart helper is enabled.
+    # 设为 false 时，supervisor 节点仍会运行，但会忽略所有重启请求。
+    # false keeps the supervisor node running but ignores all restart requests.
+    restart_enabled: false
+
+    # 要重启的 systemd --user 服务名。
+    # systemd --user service name to restart.
+    # 这里应当和 ~/.config/systemd/user/ 下面安装的服务文件名一致。
+    # This should match the installed service file name under ~/.config/systemd/user/.
+    service_name: kvoy-bringup.service
+
+    # 重启组合键需要长按的时间，单位秒。
+    # Hold duration for the restart chord, in seconds.
+    # 当前组合键是 LT+RT+A+B；不使用 LB+RB，避免和急停组合键冲突。
+    # Current chord is LT+RT+A+B; it avoids LB+RB because that chord is e-stop.
+    restart_hold_s: 2.0
+
+    # 两次有效重启请求之间的最短间隔，单位秒。
+    # Minimum time between two accepted restart requests, in seconds.
+    # 用来避免按键一直按住或抖动时反复重启。
+    # This prevents repeated restarts if the buttons are held or bounce.
+    restart_cooldown_s: 10.0
+
+    # 安全条件：只有 /robot_state 上报 FSM_WAITING 时才允许重启。
+    # Safety gate: only allow restart when /robot_state reports FSM_WAITING.
+    # 建议保持 true，确保机器人已经处于等待/阻尼状态后再重启 ROS。
+    # Keep this true so the robot is already in the idle/damping state before restarting ROS.
+    require_waiting_state: true
+
+    # 安全条件：只有当前 launch 是由 systemd 服务启动时，才允许手柄触发重启。
+    # Safety gate: only allow gamepad restart when launch was started by the systemd service.
+    # 建议保持 true，避免你手动 ros2 launch 调试时，又通过手柄启动/重启另一套服务进程。
+    # Keep this true to prevent a manual ros2 launch from restarting/starting another service copy.
+    require_systemd_env: true
+
+startup_sound_node:
+  ros__parameters:
+    # 是否在 bringup 启动后播放提示音。
+    # Whether to play a short sound after bringup starts.
+    enabled: true
+
+    # 启动后延迟多少秒再播放，避免音频设备刚插上时还没初始化完成。
+    # Delay before playing, useful while the USB audio device initializes.
+    delay_s: 0.2
+
+    # 提示音频率，单位 Hz。880Hz 是比较容易听到的短蜂鸣。
+    # Beep frequency in Hz.
+    frequency_hz: 880.0
+
+    # 单次蜂鸣持续时间，单位秒。
+    # Duration of each beep in seconds.
+    duration_s: 0.18
+
+    # 蜂鸣次数。
+    # Number of beeps.
+    repeat: 2
+
+    # 多次蜂鸣之间的间隔，单位秒。
+    # Gap between beeps in seconds.
+    gap_s: 0.08
+
+    # 音量比例，范围 0.0 到 1.0。先不要太大，避免 USB 小音箱爆音。
+    # Relative volume from 0.0 to 1.0.
+    volume: 0.35
+
+    # aplay 输出设备。空字符串表示使用系统默认声卡。
+    # aplay output device. Empty string uses the system default device.
+    # 如果 USB 扬声器不是默认声卡，可以之后填类似 plughw:1,0。
+    # If the USB speaker is not default, set something like plughw:1,0.
+    aplay_device: "plughw:2,0"

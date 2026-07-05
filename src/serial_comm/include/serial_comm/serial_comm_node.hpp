@@ -33,7 +33,10 @@ private:
     bool build_state_msg(
         const protocol::StateFrame& frame,
         kvoy_msgs::msg::MotorState& msg);
-    void store_latest_state_frame(const protocol::StateFrame& frame, uint64_t frame_seq);
+    void store_latest_state_frame(
+        const protocol::StateFrame& frame,
+        uint64_t frame_seq,
+        std::chrono::steady_clock::time_point frame_time);
     void publish_latest_state();
     void send_damping_command_from_latest_state(const char* reason);
     void capture_debug_rx_frame(const uint8_t* data);
@@ -60,6 +63,16 @@ private:
     bool     have_last_robot_fsm_state_{false};
     std::array<float, protocol::NUM_JOINTS> motor_polarity_{};
     std::array<float, protocol::NUM_JOINTS> motor_zero_offset_{};
+    float motor_cmd_position_filter_alpha_{1.0f};
+    float motor_cmd_velocity_damping_gain_{0.0f};
+    float motor_cmd_velocity_damping_max_rad_s_{2.0f};
+    float motor_state_position_filter_alpha_{1.0f};
+    float motor_state_velocity_filter_alpha_{1.0f};
+    std::array<float, protocol::NUM_JOINTS> filtered_cmd_position_{};
+    std::array<float, protocol::NUM_JOINTS> filtered_state_position_{};
+    std::array<float, protocol::NUM_JOINTS> filtered_state_velocity_{};
+    bool have_filtered_cmd_position_{false};
+    bool have_filtered_motor_state_{false};
     std::mutex        port_mutex_;
     std::mutex        rx_mutex_;
     std::mutex        latest_state_mutex_;
@@ -78,6 +91,7 @@ private:
     std::chrono::steady_clock::time_point last_rx_frame_time_{};
     bool     have_rx_frame_time_{false};
     protocol::StateFrame latest_state_frame_{};
+    std::chrono::steady_clock::time_point latest_state_time_{};
     uint64_t latest_state_seq_{0};
     uint64_t last_published_state_seq_{0};
     bool     have_latest_state_{false};

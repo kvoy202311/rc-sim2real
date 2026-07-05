@@ -12,6 +12,8 @@
   <exec_depend>imu_driver</exec_depend>
   <exec_depend>gamepad_input</exec_depend>
   <exec_depend>robot_fsm</exec_depend>
+  <exec_depend>rclpy</exec_depend>
+  <exec_depend>kvoy_msgs</exec_depend>
 
   <export>
     <build_type>ament_cmake</build_type>

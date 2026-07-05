@@ -66,6 +66,11 @@ SerialCommNode::SerialCommNode(const rclcpp::NodeOptions& options)
     declare_parameter("state_publish_rate_hz", 200.0);
     declare_parameter("motor_polarity", std::vector<int64_t>(protocol::NUM_JOINTS, 1));
     declare_parameter("motor_zero_offset", std::vector<double>(protocol::NUM_JOINTS, 0.0));
+    declare_parameter("motor_cmd_position_filter_alpha", 1.0);
+    declare_parameter("motor_cmd_velocity_damping_gain", 0.0);
+    declare_parameter("motor_cmd_velocity_damping_max_rad_s", 2.0);
+    declare_parameter("motor_state_position_filter_alpha", 1.0);
+    declare_parameter("motor_state_velocity_filter_alpha", 1.0);
     declare_parameter("debug_serial_io", false);
     declare_parameter("debug_serial_hex_bytes", false);
 
@@ -79,6 +84,68 @@ SerialCommNode::SerialCommNode(const rclcpp::NodeOptions& options)
         std::chrono::duration<double>(1.0 / state_publish_rate_hz));
     motor_polarity_ = load_motor_polarity(*this);
     motor_zero_offset_ = load_motor_zero_offset(*this);
+    const double motor_cmd_position_filter_alpha =
+        get_parameter("motor_cmd_position_filter_alpha").as_double();
+    if (!std::isfinite(motor_cmd_position_filter_alpha)) {
+        throw std::runtime_error("Parameter motor_cmd_position_filter_alpha must be finite");
+    }
+    const double clamped_motor_cmd_position_filter_alpha =
+        std::min(1.0, std::max(0.0, motor_cmd_position_filter_alpha));
+    motor_cmd_position_filter_alpha_ =
+        static_cast<float>(clamped_motor_cmd_position_filter_alpha);
+    if (motor_cmd_position_filter_alpha_ != static_cast<float>(motor_cmd_position_filter_alpha)) {
+        RCLCPP_WARN(
+            get_logger(),
+            "motor_cmd_position_filter_alpha %.3f is out of range [0, 1], clamped to %.3f",
+            motor_cmd_position_filter_alpha,
+            motor_cmd_position_filter_alpha_);
+    }
+    const double motor_cmd_velocity_damping_gain =
+        get_parameter("motor_cmd_velocity_damping_gain").as_double();
+    const double motor_cmd_velocity_damping_max_rad_s =
+        get_parameter("motor_cmd_velocity_damping_max_rad_s").as_double();
+    if (!std::isfinite(motor_cmd_velocity_damping_gain) ||
+        !std::isfinite(motor_cmd_velocity_damping_max_rad_s)) {
+        throw std::runtime_error(
+            "motor_cmd_velocity_damping_gain and motor_cmd_velocity_damping_max_rad_s must be finite");
+    }
+    motor_cmd_velocity_damping_gain_ = static_cast<float>(
+        std::max(0.0, motor_cmd_velocity_damping_gain));
+    motor_cmd_velocity_damping_max_rad_s_ = static_cast<float>(
+        std::max(0.0, motor_cmd_velocity_damping_max_rad_s));
+    const double motor_state_position_filter_alpha =
+        get_parameter("motor_state_position_filter_alpha").as_double();
+    const double motor_state_velocity_filter_alpha =
+        get_parameter("motor_state_velocity_filter_alpha").as_double();
+    if (!std::isfinite(motor_state_position_filter_alpha) ||
+        !std::isfinite(motor_state_velocity_filter_alpha)) {
+        throw std::runtime_error(
+            "motor_state_position_filter_alpha and motor_state_velocity_filter_alpha must be finite");
+    }
+    const double clamped_motor_state_position_filter_alpha =
+        std::min(1.0, std::max(0.0, motor_state_position_filter_alpha));
+    const double clamped_motor_state_velocity_filter_alpha =
+        std::min(1.0, std::max(0.0, motor_state_velocity_filter_alpha));
+    motor_state_position_filter_alpha_ =
+        static_cast<float>(clamped_motor_state_position_filter_alpha);
+    motor_state_velocity_filter_alpha_ =
+        static_cast<float>(clamped_motor_state_velocity_filter_alpha);
+    if (motor_state_position_filter_alpha_ !=
+        static_cast<float>(motor_state_position_filter_alpha)) {
+        RCLCPP_WARN(
+            get_logger(),
+            "motor_state_position_filter_alpha %.3f is out of range [0, 1], clamped to %.3f",
+            motor_state_position_filter_alpha,
+            motor_state_position_filter_alpha_);
+    }
+    if (motor_state_velocity_filter_alpha_ !=
+        static_cast<float>(motor_state_velocity_filter_alpha)) {
+        RCLCPP_WARN(
+            get_logger(),
+            "motor_state_velocity_filter_alpha %.3f is out of range [0, 1], clamped to %.3f",
+            motor_state_velocity_filter_alpha,
+            motor_state_velocity_filter_alpha_);
+    }
     debug_serial_io_ = get_parameter("debug_serial_io").as_bool();
     debug_serial_hex_bytes_ = get_parameter("debug_serial_hex_bytes").as_bool();
     last_debug_log_time_ = std::chrono::steady_clock::time_point::min();
@@ -112,6 +179,20 @@ SerialCommNode::SerialCommNode(const rclcpp::NodeOptions& options)
                 port_name_.c_str(), baud_rate_);
     RCLCPP_INFO(get_logger(), "serial_comm_node state publish rate limited to %.1f Hz",
                 state_publish_rate_hz);
+    RCLCPP_INFO(
+        get_logger(),
+        "serial_comm_node motor command position filter alpha=%.3f",
+        motor_cmd_position_filter_alpha_);
+    RCLCPP_INFO(
+        get_logger(),
+        "serial_comm_node motor command velocity damping gain=%.3f max=%.3f rad/s",
+        motor_cmd_velocity_damping_gain_,
+        motor_cmd_velocity_damping_max_rad_s_);
+    RCLCPP_INFO(
+        get_logger(),
+        "serial_comm_node motor state filter alpha: position=%.3f velocity=%.3f",
+        motor_state_position_filter_alpha_,
+        motor_state_velocity_filter_alpha_);
     if (debug_serial_io_) {
         RCLCPP_INFO(
             get_logger(),
@@ -319,13 +400,18 @@ bool SerialCommNode::build_state_msg(
     const protocol::StateFrame& frame,
     kvoy_msgs::msg::MotorState& msg)
 {
+    std::array<float, protocol::NUM_JOINTS> position_urdf{};
+    std::array<float, protocol::NUM_JOINTS> velocity_urdf{};
+    std::array<float, protocol::NUM_JOINTS> torque_urdf{};
+
     for (int i = 0; i < 12; ++i) {
-        const float sign = motor_polarity_[static_cast<std::size_t>(i)];
-        const float offset = motor_zero_offset_[static_cast<std::size_t>(i)];
+        const std::size_t idx = static_cast<std::size_t>(i);
+        const float sign = motor_polarity_[idx];
+        const float offset = motor_zero_offset_[idx];
         const float position =
-            frame.joints.position[static_cast<std::size_t>(i)] * sign + offset;
-        const float velocity = frame.joints.velocity[static_cast<std::size_t>(i)] * sign;
-        const float torque = frame.joints.torque[static_cast<std::size_t>(i)] * sign;
+            frame.joints.position[idx] * sign + offset;
+        const float velocity = frame.joints.velocity[idx] * sign;
+        const float torque = frame.joints.torque[idx] * sign;
         if (!std::isfinite(position) || !std::isfinite(velocity) || !std::isfinite(torque)) {
             RCLCPP_ERROR_THROTTLE(
                 get_logger(), *get_clock(), 2000,
@@ -333,9 +419,34 @@ bool SerialCommNode::build_state_msg(
             ++rx_drop_count_;
             return false;
         }
-        msg.position[i] = position;
-        msg.velocity[i] = velocity;
-        msg.torque[i]   = torque;
+        position_urdf[idx] = position;
+        velocity_urdf[idx] = velocity;
+        torque_urdf[idx] = torque;
+    }
+
+    if (!have_filtered_motor_state_) {
+        filtered_state_position_ = position_urdf;
+        filtered_state_velocity_ = velocity_urdf;
+        have_filtered_motor_state_ = true;
+    } else {
+        const float pos_alpha = motor_state_position_filter_alpha_;
+        const float vel_alpha = motor_state_velocity_filter_alpha_;
+        const float one_minus_pos_alpha = 1.0f - pos_alpha;
+        const float one_minus_vel_alpha = 1.0f - vel_alpha;
+        for (int i = 0; i < protocol::NUM_JOINTS; ++i) {
+            const std::size_t idx = static_cast<std::size_t>(i);
+            filtered_state_position_[idx] =
+                pos_alpha * position_urdf[idx] + one_minus_pos_alpha * filtered_state_position_[idx];
+            filtered_state_velocity_[idx] =
+                vel_alpha * velocity_urdf[idx] + one_minus_vel_alpha * filtered_state_velocity_[idx];
+        }
+    }
+
+    for (int i = 0; i < protocol::NUM_JOINTS; ++i) {
+        const std::size_t idx = static_cast<std::size_t>(i);
+        msg.position[i] = filtered_state_position_[idx];
+        msg.velocity[i] = filtered_state_velocity_[idx];
+        msg.torque[i] = torque_urdf[idx];
     }
 
     return true;
@@ -343,10 +454,12 @@ bool SerialCommNode::build_state_msg(
 
 void SerialCommNode::store_latest_state_frame(
     const protocol::StateFrame& frame,
-    uint64_t frame_seq)
+    uint64_t frame_seq,
+    std::chrono::steady_clock::time_point frame_time)
 {
     std::lock_guard<std::mutex> lock(latest_state_mutex_);
     latest_state_frame_ = frame;
+    latest_state_time_ = frame_time;
     latest_state_seq_ = frame_seq;
     have_latest_state_ = true;
 }
@@ -565,7 +678,7 @@ void SerialCommNode::process_rx_bytes(const uint8_t* data, std::size_t len)
         last_rx_frame_time_ = frame_time;
         have_rx_frame_time_ = true;
         const uint64_t frame_seq = ++rx_frame_count_;
-        store_latest_state_frame(frame, frame_seq);
+        store_latest_state_frame(frame, frame_seq, frame_time);
         capture_debug_rx_frame(rx_frame_buf_.data());
         rx_frame_pos_ = 0;
     }
@@ -646,16 +759,57 @@ void SerialCommNode::on_motor_cmd(const kvoy_msgs::msg::MotorCmd::SharedPtr msg)
                 "Serial write aborted: motor command contains non-finite values");
             return;
         }
+    }
 
-        const float sign = motor_polarity_[static_cast<std::size_t>(i)];
-        const float offset = motor_zero_offset_[static_cast<std::size_t>(i)];
-        tx_position[static_cast<std::size_t>(i)] = (msg->position[i] - offset) * sign;
-        tx_velocity[static_cast<std::size_t>(i)] = msg->velocity[i] * sign;
-        tx_torque[static_cast<std::size_t>(i)] = msg->torque[i] * sign;
+    if (!have_filtered_cmd_position_) {
+        for (int i = 0; i < NUM_JOINTS; ++i) {
+            filtered_cmd_position_[static_cast<std::size_t>(i)] = msg->position[i];
+        }
+        have_filtered_cmd_position_ = true;
+    } else {
+        const float alpha = motor_cmd_position_filter_alpha_;
+        const float one_minus_alpha = 1.0f - alpha;
+        for (int i = 0; i < NUM_JOINTS; ++i) {
+            const std::size_t idx = static_cast<std::size_t>(i);
+            filtered_cmd_position_[idx] =
+                alpha * msg->position[i] + one_minus_alpha * filtered_cmd_position_[idx];
+        }
+    }
+
+    protocol::StateFrame latest_state{};
+    bool have_fresh_latest_state = false;
+    const auto now_steady = std::chrono::steady_clock::now();
+    if (motor_cmd_velocity_damping_gain_ > 0.0f) {
+        std::lock_guard<std::mutex> lock(latest_state_mutex_);
+        if (have_latest_state_) {
+            const auto state_age_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                now_steady - latest_state_time_).count();
+            if (state_age_ms <= rx_timeout_ms_) {
+                latest_state = latest_state_frame_;
+                have_fresh_latest_state = true;
+            }
+        }
+    }
+
+    for (int i = 0; i < NUM_JOINTS; ++i) {
+        const std::size_t idx = static_cast<std::size_t>(i);
+        const float sign = motor_polarity_[idx];
+        const float offset = motor_zero_offset_[idx];
+        float velocity_target = msg->velocity[i];
+        if (have_fresh_latest_state) {
+            const float measured_velocity_urdf = latest_state.joints.velocity[idx] * sign;
+            const float damping_velocity =
+                -motor_cmd_velocity_damping_gain_ * measured_velocity_urdf;
+            velocity_target += std::max(
+                -motor_cmd_velocity_damping_max_rad_s_,
+                std::min(motor_cmd_velocity_damping_max_rad_s_, damping_velocity));
+        }
+        tx_position[idx] = (filtered_cmd_position_[idx] - offset) * sign;
+        tx_velocity[idx] = velocity_target * sign;
+        tx_torque[idx] = msg->torque[i] * sign;
     }
 
     RawCmdFrame frame{};
-    const auto now_steady = std::chrono::steady_clock::now();
     if (!have_robot_state_ || now_steady - last_robot_state_time_ > kRobotStateTimeout) {
         const uint8_t prev_mode = cmd_ctrl_mode_.exchange(protocol::CTRL_MODE_DAMPING);
         if (prev_mode != protocol::CTRL_MODE_DAMPING) {

@@ -1,0 +1,3 @@
+# Allow kvoy systemd user service to read GameSir gamepad input devices.
+SUBSYSTEM=="input", ATTRS{idVendor}=="3537", ATTRS{idProduct}=="0575", MODE="0660", GROUP="input", TAG+="uaccess"
+SUBSYSTEM=="input", ATTRS{idVendor}=="3537", ATTRS{idProduct}=="1022", MODE="0660", GROUP="input", TAG+="uaccess"

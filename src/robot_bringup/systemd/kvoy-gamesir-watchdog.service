@@ -1,0 +1,24 @@
+[Unit]
+Description=Kvoy GameSir USB mode watchdog
+After=systemd-udevd.service
+Wants=systemd-udevd.service
+
+[Service]
+Type=simple
+Environment=KVOY_USER=robocon-2026
+Environment=KVOY_UID=1001
+Environment=KVOY_BRINGUP_SERVICE=kvoy-bringup.service
+Environment=KVOY_GAMESIR_CHECK_INTERVAL_S=2.0
+Environment=KVOY_GAMESIR_RESET_COOLDOWN_S=5.0
+Environment=KVOY_GAMESIR_POST_RESET_WAIT_S=4.0
+Environment=KVOY_GAMESIR_MAX_FAST_RESETS=4
+Environment=KVOY_GAMESIR_SLOW_RETRY_S=30.0
+Environment=KVOY_GAMESIR_ALERT_AFTER_RESETS=4
+Environment=KVOY_GAMESIR_ALERT_INTERVAL_S=20.0
+Environment=KVOY_GAMESIR_ALERT_APLAY_DEVICE=plughw:2,0
+ExecStart=/home/robocon-2026/Desktop/RC2026/kvoy_quadruped/install/robot_bringup/lib/robot_bringup/gamesir_usb_watchdog.py
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

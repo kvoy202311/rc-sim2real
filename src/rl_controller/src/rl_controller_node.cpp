@@ -144,6 +144,30 @@ inline float det3(const std::array<float, 9>& m)
            m[2] * (m[3] * m[7] - m[4] * m[6]);
 }
 
+inline float wrap_pi(float angle)
+{
+    constexpr float kPi = 3.14159265358979323846f;
+    constexpr float kTwoPi = 2.0f * kPi;
+    while (angle > kPi) {
+        angle -= kTwoPi;
+    }
+    while (angle < -kPi) {
+        angle += kTwoPi;
+    }
+    return angle;
+}
+
+inline float yaw_from_quat(const std::array<float, 4>& q)
+{
+    const float x = q[0];
+    const float y = q[1];
+    const float z = q[2];
+    const float w = q[3];
+    return std::atan2(
+        2.0f * (w * z + x * y),
+        1.0f - 2.0f * (y * y + z * z));
+}
+
 constexpr int kPolicySwitchHoldCycles = 10;
 
 } // namespace
@@ -151,7 +175,7 @@ constexpr int kPolicySwitchHoldCycles = 10;
 struct RLControllerNode::PolicyConfig
 {
     int history_steps{6};
-    int one_step_obs{HIMLOCO_V1_ONE_STEP_OBS};
+    int one_step_obs{HIMLOCO_V1_BASE_ONE_STEP_OBS};
     std::array<float, NUM_JOINTS> default_joint_pos{STAND_POS};
     float action_scale{0.25f};
     float clip_obs{100.0f};
@@ -161,6 +185,8 @@ struct RLControllerNode::PolicyConfig
     float obs_dof_vel_scale{0.05f};
     float cmd_lin_vel_scale{2.0f};
     float cmd_ang_vel_scale{0.25f};
+    bool height_command_enabled{false};
+    float cmd_height_scale{4.0f};
 
     int total_obs() const { return history_steps * one_step_obs; }
 };
@@ -220,6 +246,16 @@ RLControllerNode::RLControllerNode(const rclcpp::NodeOptions& options)
     declare_parameter("obs_dof_vel_scale", 0.05);
     declare_parameter("cmd_lin_vel_scale", 2.0);
     declare_parameter("cmd_ang_vel_scale", 0.25);
+    declare_parameter("height_command_min_m", 0.10);
+    declare_parameter("height_command_max_m", 0.26);
+    declare_parameter("height_command_default_m", 0.18);
+    declare_parameter("height_command_step_m", 0.01);
+    declare_parameter("height_command_zero_cmd_threshold", 0.05);
+    declare_parameter("yaw_command_mode", std::string{"rate"});
+    declare_parameter("heading_command_error_gain", 0.5);
+    declare_parameter("heading_command_max_yaw_rate_rad_s", 1.0);
+    declare_parameter("imu_ang_vel_filter_alpha", 1.0);
+    declare_parameter("imu_projected_gravity_filter_alpha", 1.0);
     declare_parameter("joint_pos_min", std::vector<double>(NUM_JOINTS, -3.14));
     declare_parameter("joint_pos_max", std::vector<double>(NUM_JOINTS,  3.14));
     declare_parameter("max_imu_age_s",     0.1);
@@ -239,6 +275,59 @@ RLControllerNode::RLControllerNode(const rclcpp::NodeOptions& options)
     obs_dof_vel_scale_ = static_cast<float>(get_parameter("obs_dof_vel_scale").as_double());
     cmd_lin_vel_scale_ = static_cast<float>(get_parameter("cmd_lin_vel_scale").as_double());
     cmd_ang_vel_scale_ = static_cast<float>(get_parameter("cmd_ang_vel_scale").as_double());
+    height_command_min_m_ = static_cast<float>(get_parameter("height_command_min_m").as_double());
+    height_command_max_m_ = static_cast<float>(get_parameter("height_command_max_m").as_double());
+    height_command_default_m_ = static_cast<float>(get_parameter("height_command_default_m").as_double());
+    height_command_step_m_ = static_cast<float>(
+        std::max(0.0, get_parameter("height_command_step_m").as_double()));
+    height_command_zero_cmd_threshold_ = static_cast<float>(
+        std::max(0.0, get_parameter("height_command_zero_cmd_threshold").as_double()));
+    if (!std::isfinite(height_command_min_m_) ||
+        !std::isfinite(height_command_max_m_) ||
+        !std::isfinite(height_command_default_m_) ||
+        height_command_min_m_ > height_command_max_m_) {
+        throw std::runtime_error(
+            "height_command_min_m/default_m/max_m must be finite and satisfy min <= max");
+    }
+    height_command_default_m_ = std::max(
+        height_command_min_m_, std::min(height_command_max_m_, height_command_default_m_));
+    height_command_m_ = height_command_default_m_;
+    yaw_command_mode_ = trim_copy(get_parameter("yaw_command_mode").as_string());
+    if (yaw_command_mode_ != "rate" && yaw_command_mode_ != "heading") {
+        throw std::runtime_error("yaw_command_mode must be either 'rate' or 'heading'");
+    }
+    heading_command_error_gain_ = static_cast<float>(
+        std::max(0.0, get_parameter("heading_command_error_gain").as_double()));
+    heading_command_max_yaw_rate_rad_s_ = static_cast<float>(
+        std::max(0.0, get_parameter("heading_command_max_yaw_rate_rad_s").as_double()));
+    const double imu_ang_vel_filter_alpha =
+        get_parameter("imu_ang_vel_filter_alpha").as_double();
+    const double imu_projected_gravity_filter_alpha =
+        get_parameter("imu_projected_gravity_filter_alpha").as_double();
+    if (!std::isfinite(imu_ang_vel_filter_alpha) ||
+        !std::isfinite(imu_projected_gravity_filter_alpha)) {
+        throw std::runtime_error(
+            "imu_ang_vel_filter_alpha and imu_projected_gravity_filter_alpha must be finite");
+    }
+    imu_ang_vel_filter_alpha_ = static_cast<float>(
+        std::min(1.0, std::max(0.0, imu_ang_vel_filter_alpha)));
+    imu_projected_gravity_filter_alpha_ = static_cast<float>(
+        std::min(1.0, std::max(0.0, imu_projected_gravity_filter_alpha)));
+    if (imu_ang_vel_filter_alpha_ != static_cast<float>(imu_ang_vel_filter_alpha)) {
+        RCLCPP_WARN(
+            get_logger(),
+            "imu_ang_vel_filter_alpha %.3f is out of range [0, 1], clamped to %.3f",
+            imu_ang_vel_filter_alpha,
+            imu_ang_vel_filter_alpha_);
+    }
+    if (imu_projected_gravity_filter_alpha_ !=
+        static_cast<float>(imu_projected_gravity_filter_alpha)) {
+        RCLCPP_WARN(
+            get_logger(),
+            "imu_projected_gravity_filter_alpha %.3f is out of range [0, 1], clamped to %.3f",
+            imu_projected_gravity_filter_alpha,
+            imu_projected_gravity_filter_alpha_);
+    }
     const auto joint_pos_min = get_parameter("joint_pos_min").as_double_array();
     const auto joint_pos_max = get_parameter("joint_pos_max").as_double_array();
     if (joint_pos_min.size() != NUM_JOINTS || joint_pos_max.size() != NUM_JOINTS) {
@@ -281,10 +370,16 @@ RLControllerNode::RLControllerNode(const rclcpp::NodeOptions& options)
     cmd_pub_ = create_publisher<kvoy_msgs::msg::MotorCmd>("/motor_cmd", 10);
 
     const double rate = get_parameter("control_rate_hz").as_double();
+    control_period_s_ = 1.0 / std::max(1.0, rate);
     auto period = std::chrono::duration<double>(1.0 / rate);
     timer_ = create_wall_timer(period, std::bind(&RLControllerNode::control_loop, this));
 
     RCLCPP_INFO(get_logger(), "rl_controller_node ready (%.0f Hz)", rate);
+    RCLCPP_INFO(
+        get_logger(),
+        "RL yaw command mode: %s%s",
+        yaw_command_mode_.c_str(),
+        yaw_command_mode_ == "heading" ? " (gamepad yaw_rate integrated to heading command)" : "");
 }
 
 RLControllerNode::~RLControllerNode() = default;
@@ -339,6 +434,8 @@ void RLControllerNode::set_active(bool active)
         }
         hold_position_target_ = joint_pos_;
         hold_cycles_remaining_ = has_motor_state_ ? kPolicySwitchHoldCycles : 0;
+        has_heading_target_ = false;
+        last_heading_update_time_ = now();
     }
 }
 
@@ -484,7 +581,7 @@ RLControllerNode::PolicyConfig RLControllerNode::make_default_policy_config() co
 {
     PolicyConfig config;
     config.history_steps = 6;
-    config.one_step_obs = HIMLOCO_V1_ONE_STEP_OBS;
+    config.one_step_obs = HIMLOCO_V1_BASE_ONE_STEP_OBS;
     config.default_joint_pos = STAND_POS;
     config.action_scale = action_scale_;
     config.clip_obs = clip_obs_;
@@ -494,6 +591,8 @@ RLControllerNode::PolicyConfig RLControllerNode::make_default_policy_config() co
     config.obs_dof_vel_scale = obs_dof_vel_scale_;
     config.cmd_lin_vel_scale = cmd_lin_vel_scale_;
     config.cmd_ang_vel_scale = cmd_ang_vel_scale_;
+    config.height_command_enabled = false;
+    config.cmd_height_scale = 4.0f;
     return config;
 }
 
@@ -545,6 +644,8 @@ void RLControllerNode::load_policies_from_params()
         declare_parameter(slot_name + ".obs_dof_vel_scale", default_config.obs_dof_vel_scale);
         declare_parameter(slot_name + ".cmd_lin_vel_scale", default_config.cmd_lin_vel_scale);
         declare_parameter(slot_name + ".cmd_ang_vel_scale", default_config.cmd_ang_vel_scale);
+        declare_parameter(slot_name + ".height_command_enabled", default_config.height_command_enabled);
+        declare_parameter(slot_name + ".cmd_height_scale", default_config.cmd_height_scale);
 
         const std::string policy_name = trim_copy(get_parameter(slot_name + ".name").as_string());
         const std::string policy_path = trim_copy(get_parameter(slot_name + ".path").as_string());
@@ -564,9 +665,10 @@ void RLControllerNode::load_policies_from_params()
         if (config.history_steps <= 0 || config.one_step_obs <= 0) {
             throw std::runtime_error("policy slot '" + slot_name + "' must have positive history_steps and one_step_obs");
         }
-        if (config.one_step_obs != HIMLOCO_V1_ONE_STEP_OBS) {
+        if (config.one_step_obs != HIMLOCO_V1_BASE_ONE_STEP_OBS &&
+            config.one_step_obs != HIMLOCO_V1_HEIGHT_ONE_STEP_OBS) {
             throw std::runtime_error(
-                "policy slot '" + slot_name + "' currently only supports one_step_obs = 45");
+                "policy slot '" + slot_name + "' only supports one_step_obs = 45 or 46");
         }
         const auto default_pos = get_parameter(slot_name + ".default_joint_pos").as_double_array();
         if (default_pos.size() != NUM_JOINTS) {
@@ -585,6 +687,22 @@ void RLControllerNode::load_policies_from_params()
         config.obs_dof_vel_scale = static_cast<float>(get_parameter(slot_name + ".obs_dof_vel_scale").as_double());
         config.cmd_lin_vel_scale = static_cast<float>(get_parameter(slot_name + ".cmd_lin_vel_scale").as_double());
         config.cmd_ang_vel_scale = static_cast<float>(get_parameter(slot_name + ".cmd_ang_vel_scale").as_double());
+        config.height_command_enabled = get_parameter(slot_name + ".height_command_enabled").as_bool();
+        config.cmd_height_scale = static_cast<float>(get_parameter(slot_name + ".cmd_height_scale").as_double());
+        if (config.height_command_enabled &&
+            config.one_step_obs != HIMLOCO_V1_HEIGHT_ONE_STEP_OBS) {
+            throw std::runtime_error(
+                "policy slot '" + slot_name + "' has height_command_enabled=true but one_step_obs is not 46");
+        }
+        if (!config.height_command_enabled &&
+            config.one_step_obs != HIMLOCO_V1_BASE_ONE_STEP_OBS) {
+            throw std::runtime_error(
+                "policy slot '" + slot_name + "' has height_command_enabled=false but one_step_obs is not 45");
+        }
+        if (!std::isfinite(config.cmd_height_scale)) {
+            throw std::runtime_error(
+                "policy slot '" + slot_name + "'.cmd_height_scale must be finite");
+        }
 
         auto trt = load_engine(policy_name, policy_path, config);
         policies_.emplace(policy_name, std::move(trt));
@@ -720,9 +838,29 @@ void RLControllerNode::on_imu(const kvoy_msgs::msg::ImuData::SharedPtr msg)
     const std::array<float, 3> gravity_world{0.0f, 0.0f, -1.0f};
 
     std::lock_guard<std::mutex> lock(mutex_);
+    current_yaw_ = yaw_from_quat(sensor_quat);
+    has_current_yaw_ = true;
     const auto gravity_sensor = quat_rotate_inverse(sensor_quat, gravity_world);
-    ang_vel_ = mat3_mul_vec3(imu_to_body_rotation_, sensor_ang_vel);
-    projected_gravity_ = mat3_mul_vec3(imu_to_body_rotation_, gravity_sensor);
+    const auto raw_ang_vel = mat3_mul_vec3(imu_to_body_rotation_, sensor_ang_vel);
+    const auto raw_projected_gravity = mat3_mul_vec3(imu_to_body_rotation_, gravity_sensor);
+    if (!has_filtered_imu_) {
+        ang_vel_ = raw_ang_vel;
+        projected_gravity_ = raw_projected_gravity;
+        has_filtered_imu_ = true;
+    } else {
+        const float ang_alpha = imu_ang_vel_filter_alpha_;
+        const float gravity_alpha = imu_projected_gravity_filter_alpha_;
+        const float one_minus_ang_alpha = 1.0f - ang_alpha;
+        const float one_minus_gravity_alpha = 1.0f - gravity_alpha;
+        for (int i = 0; i < 3; ++i) {
+            ang_vel_[static_cast<std::size_t>(i)] =
+                ang_alpha * raw_ang_vel[static_cast<std::size_t>(i)] +
+                one_minus_ang_alpha * ang_vel_[static_cast<std::size_t>(i)];
+            projected_gravity_[static_cast<std::size_t>(i)] =
+                gravity_alpha * raw_projected_gravity[static_cast<std::size_t>(i)] +
+                one_minus_gravity_alpha * projected_gravity_[static_cast<std::size_t>(i)];
+        }
+    }
     last_imu_time_ = now();
     has_imu_ = true;
 }
@@ -733,6 +871,40 @@ void RLControllerNode::on_gamepad(const kvoy_msgs::msg::GamepadCmd::SharedPtr ms
     command_[0] = msg->vx;
     command_[1] = msg->vy;
     command_[2] = msg->yaw_rate;
+
+    const bool press_height_up = msg->btn_dpad_up && !prev_btn_dpad_up_;
+    const bool press_height_down = msg->btn_dpad_down && !prev_btn_dpad_down_;
+    prev_btn_dpad_up_ = msg->btn_dpad_up;
+    prev_btn_dpad_down_ = msg->btn_dpad_down;
+
+    const bool zero_velocity_command =
+        std::abs(command_[0]) <= height_command_zero_cmd_threshold_ &&
+        std::abs(command_[1]) <= height_command_zero_cmd_threshold_ &&
+        std::abs(command_[2]) <= height_command_zero_cmd_threshold_;
+
+    const bool active_policy_uses_height = [&]() {
+        auto it = policies_.find(active_policy_name_);
+        return it != policies_.end() && it->second->config.height_command_enabled;
+    }();
+
+    if ((press_height_up || press_height_down) && active_policy_uses_height) {
+        if (zero_velocity_command) {
+            const float delta = press_height_up ? height_command_step_m_ : -height_command_step_m_;
+            const float old_height = height_command_m_;
+            height_command_m_ = std::max(
+                height_command_min_m_, std::min(height_command_max_m_, height_command_m_ + delta));
+            if (height_command_m_ != old_height) {
+                RCLCPP_INFO(
+                    get_logger(),
+                    "Height command changed to %.3f m (range %.3f..%.3f)",
+                    height_command_m_, height_command_min_m_, height_command_max_m_);
+            }
+        } else {
+            RCLCPP_WARN_THROTTLE(
+                get_logger(), *get_clock(), 1000,
+                "Height command ignored: velocity command must be zero");
+        }
+    }
 
     const bool press_prev = msg->btn_policy_prev && !prev_btn_policy_prev_;
     const bool press_next = msg->btn_policy_next && !prev_btn_policy_next_;
@@ -745,6 +917,49 @@ void RLControllerNode::on_gamepad(const kvoy_msgs::msg::GamepadCmd::SharedPtr ms
     if (press_next && !select_policy_by_offset_locked(1)) {
         RCLCPP_WARN(get_logger(), "Policy switch to next failed");
     }
+}
+
+void RLControllerNode::update_policy_command_locked(const rclcpp::Time& stamp)
+{
+    policy_command_[0] = command_[0];
+    policy_command_[1] = command_[1];
+
+    if (yaw_command_mode_ != "heading") {
+        policy_command_[2] = command_[2];
+        has_heading_target_ = false;
+        last_heading_update_time_ = stamp;
+        return;
+    }
+
+    if (!has_current_yaw_) {
+        policy_command_[2] = 0.0f;
+        has_heading_target_ = false;
+        last_heading_update_time_ = stamp;
+        return;
+    }
+
+    if (!active_ || !has_heading_target_) {
+        target_yaw_ = current_yaw_;
+        has_heading_target_ = true;
+        last_heading_update_time_ = stamp;
+    }
+
+    double dt = control_period_s_;
+    if (last_heading_update_time_.nanoseconds() > 0) {
+        dt = (stamp - last_heading_update_time_).seconds();
+    }
+    if (!std::isfinite(dt) || dt <= 0.0 || dt > 0.2) {
+        dt = control_period_s_;
+    }
+    last_heading_update_time_ = stamp;
+
+    target_yaw_ = wrap_pi(target_yaw_ + command_[2] * static_cast<float>(dt));
+    const float heading_error = wrap_pi(target_yaw_ - current_yaw_);
+    float yaw_command = heading_command_error_gain_ * heading_error;
+    yaw_command = std::max(
+        -heading_command_max_yaw_rate_rad_s_,
+        std::min(heading_command_max_yaw_rate_rad_s_, yaw_command));
+    policy_command_[2] = yaw_command;
 }
 
 std::array<float, 3> RLControllerNode::quat_rotate_inverse(
@@ -786,33 +1001,40 @@ std::array<float, 3> RLControllerNode::mat3_mul_vec3(
     };
 }
 
-std::array<float, RLControllerNode::HIMLOCO_V1_ONE_STEP_OBS> RLControllerNode::build_obs(
+std::vector<float> RLControllerNode::build_obs(
     const PolicyConfig& config,
     const std::array<float, NUM_JOINTS>& last_action) const
 {
-    std::array<float, HIMLOCO_V1_ONE_STEP_OBS> obs{};
-    int idx = 0;
+    std::vector<float> obs;
+    obs.reserve(static_cast<std::size_t>(config.one_step_obs));
 
-    obs[idx++] = command_[0] * config.cmd_lin_vel_scale;
-    obs[idx++] = command_[1] * config.cmd_lin_vel_scale;
-    obs[idx++] = command_[2] * config.cmd_ang_vel_scale;
+    obs.push_back(policy_command_[0] * config.cmd_lin_vel_scale);
+    obs.push_back(policy_command_[1] * config.cmd_lin_vel_scale);
+    obs.push_back(policy_command_[2] * config.cmd_ang_vel_scale);
+    if (config.height_command_enabled) {
+        obs.push_back(height_command_m_ * config.cmd_height_scale);
+    }
 
-    obs[idx++] = ang_vel_[0] * config.obs_ang_vel_scale;
-    obs[idx++] = ang_vel_[1] * config.obs_ang_vel_scale;
-    obs[idx++] = ang_vel_[2] * config.obs_ang_vel_scale;
+    obs.push_back(ang_vel_[0] * config.obs_ang_vel_scale);
+    obs.push_back(ang_vel_[1] * config.obs_ang_vel_scale);
+    obs.push_back(ang_vel_[2] * config.obs_ang_vel_scale);
 
-    obs[idx++] = projected_gravity_[0];
-    obs[idx++] = projected_gravity_[1];
-    obs[idx++] = projected_gravity_[2];
+    obs.push_back(projected_gravity_[0]);
+    obs.push_back(projected_gravity_[1]);
+    obs.push_back(projected_gravity_[2]);
 
     for (int i = 0; i < NUM_JOINTS; ++i) {
-        obs[idx++] = (joint_pos_[i] - config.default_joint_pos[i]) * config.obs_dof_pos_scale;
+        obs.push_back((joint_pos_[i] - config.default_joint_pos[i]) * config.obs_dof_pos_scale);
     }
     for (int i = 0; i < NUM_JOINTS; ++i) {
-        obs[idx++] = joint_vel_[i] * config.obs_dof_vel_scale;
+        obs.push_back(joint_vel_[i] * config.obs_dof_vel_scale);
     }
     for (int i = 0; i < NUM_JOINTS; ++i) {
-        obs[idx++] = last_action[i];
+        obs.push_back(last_action[i]);
+    }
+
+    if (obs.size() != static_cast<std::size_t>(config.one_step_obs)) {
+        throw std::runtime_error("internal observation size mismatch");
     }
 
     for (auto& v : obs) {
@@ -896,6 +1118,7 @@ void RLControllerNode::control_loop()
             return;
         }
 
+        update_policy_command_locked(now());
         if (hold_cycles_remaining_ > 0) {
             hold_position_snapshot = hold_position_target_;
             --hold_cycles_remaining_;

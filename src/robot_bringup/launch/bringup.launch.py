@@ -5,12 +5,15 @@ from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, OpaqueFunction
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
+from launch.conditions import IfCondition
 
 
 def generate_launch_description():
     params_file = LaunchConfiguration("params_file")
     params_override_file = LaunchConfiguration("params_override_file")
     policies_file = LaunchConfiguration("policies_file")
+    enable_restart_supervisor = LaunchConfiguration("enable_restart_supervisor")
+    enable_startup_sound = LaunchConfiguration("enable_startup_sound")
 
     default_params = os.path.join(
         get_package_share_directory("robot_bringup"),
@@ -54,11 +57,27 @@ def generate_launch_description():
                 name="robot_fsm_node",
                 parameters=runtime_params + [policies_file],
             ),
+            Node(
+                package="robot_bringup",
+                executable="bringup_restart_supervisor.py",
+                name="bringup_restart_supervisor",
+                parameters=runtime_params,
+                condition=IfCondition(enable_restart_supervisor),
+            ),
+            Node(
+                package="robot_bringup",
+                executable="startup_sound_node.py",
+                name="startup_sound_node",
+                parameters=runtime_params,
+                condition=IfCondition(enable_startup_sound),
+            ),
         ]
 
     return LaunchDescription([
         DeclareLaunchArgument("params_file", default_value=default_params),
         DeclareLaunchArgument("params_override_file", default_value=""),
         DeclareLaunchArgument("policies_file", default_value=default_policies),
+        DeclareLaunchArgument("enable_restart_supervisor", default_value="true"),
+        DeclareLaunchArgument("enable_startup_sound", default_value="true"),
         OpaqueFunction(function=launch_setup),
     ])

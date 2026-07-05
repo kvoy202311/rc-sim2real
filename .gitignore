@@ -1,5 +1,9 @@
 /build/
 /install/
 /log/
+/.vscode/
+/.ven.venv_policy_export/
+/.codex/
+/.agents/
 
-.vscode
+CLAUDE.md

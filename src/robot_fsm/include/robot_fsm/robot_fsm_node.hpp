@@ -29,6 +29,7 @@ enum class FsmState {
 //   RUNNING  --[btn_standup]--> STANDING
 //   STANDING --[btn_liedown && zero velocity command]--> LIEDOWN
 //   LIEDOWN  --[motion done]--> WAITING
+//   ESTOP    --[btn_liedown] --> WAITING  (stay damping)
 //   ESTOP    --[btn_standup]--> STANDUP  (re-arm)
 //   any      --[btn_estop]  --> ESTOP
 

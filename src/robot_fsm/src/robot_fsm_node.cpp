@@ -86,6 +86,7 @@ RobotFsmNode::RobotFsmNode(const rclcpp::NodeOptions& options)
     RCLCPP_INFO(get_logger(), "  LT+LB+Y    -> wait->stand / stand->run / run->stand");
     RCLCPP_INFO(get_logger(), "  RT+RB+X    -> stand->lie (only when cmd velocity is zero)");
     RCLCPP_INFO(get_logger(), "  LB+RB      -> emergency stop");
+    RCLCPP_INFO(get_logger(), "  RT+RB+X    -> estop->wait/damping");
 
     publish_robot_state();
 }
@@ -134,6 +135,24 @@ rclcpp::NodeOptions RobotFsmNode::make_rl_options()
         rclcpp::Parameter("obs_dof_vel_scale", get_double_param(*this, "obs_dof_vel_scale", 0.05)),
         rclcpp::Parameter("cmd_lin_vel_scale", get_double_param(*this, "cmd_lin_vel_scale", 2.0)),
         rclcpp::Parameter("cmd_ang_vel_scale", get_double_param(*this, "cmd_ang_vel_scale", 0.25)),
+        rclcpp::Parameter("height_command_min_m", get_double_param(*this, "height_command_min_m", 0.10)),
+        rclcpp::Parameter("height_command_max_m", get_double_param(*this, "height_command_max_m", 0.26)),
+        rclcpp::Parameter("height_command_default_m", get_double_param(*this, "height_command_default_m", 0.18)),
+        rclcpp::Parameter("height_command_step_m", get_double_param(*this, "height_command_step_m", 0.01)),
+        rclcpp::Parameter(
+            "height_command_zero_cmd_threshold",
+            get_double_param(*this, "height_command_zero_cmd_threshold", 0.05)),
+        rclcpp::Parameter("yaw_command_mode", get_string_param(*this, "yaw_command_mode", "rate")),
+        rclcpp::Parameter(
+            "heading_command_error_gain",
+            get_double_param(*this, "heading_command_error_gain", 0.5)),
+        rclcpp::Parameter(
+            "heading_command_max_yaw_rate_rad_s",
+            get_double_param(*this, "heading_command_max_yaw_rate_rad_s", 1.0)),
+        rclcpp::Parameter("imu_ang_vel_filter_alpha", get_double_param(*this, "imu_ang_vel_filter_alpha", 1.0)),
+        rclcpp::Parameter(
+            "imu_projected_gravity_filter_alpha",
+            get_double_param(*this, "imu_projected_gravity_filter_alpha", 1.0)),
         rclcpp::Parameter(
             "joint_pos_min",
             get_double_array_param(*this, "joint_pos_min", std::vector<double>(NUM_JOINTS, -3.14))),
@@ -183,6 +202,10 @@ rclcpp::NodeOptions RobotFsmNode::make_rl_options()
                                get_double_param(*this, slot_name + ".cmd_lin_vel_scale", 2.0));
         overrides.emplace_back(slot_name + ".cmd_ang_vel_scale",
                                get_double_param(*this, slot_name + ".cmd_ang_vel_scale", 0.25));
+        overrides.emplace_back(slot_name + ".height_command_enabled",
+                               get_bool_param(*this, slot_name + ".height_command_enabled", false));
+        overrides.emplace_back(slot_name + ".cmd_height_scale",
+                               get_double_param(*this, slot_name + ".cmd_height_scale", 4.0));
     }
 
     return rclcpp::NodeOptions()
@@ -249,8 +272,9 @@ void RobotFsmNode::on_gamepad(const kvoy_msgs::msg::GamepadCmd::SharedPtr msg)
             break;
 
         case FsmState::ESTOP:
-            // Re-arm: stand up again
-            if (press_standup) {
+            if (press_liedown) {
+                transition_to(FsmState::WAITING);
+            } else if (press_standup) {
                 if (!has_motor_state_) {
                     RCLCPP_WARN(
                         get_logger(),

@@ -1,0 +1,19 @@
+[Unit]
+Description=Kvoy Quadruped ROS2 Bringup
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/robocon-2026/Desktop/RC2026/kvoy_quadruped
+Environment=KVOY_WORKSPACE=/home/robocon-2026/Desktop/RC2026/kvoy_quadruped
+Environment=ROS_DISTRO=foxy
+Environment=KVOY_SYSTEMD_MANAGED=1
+ExecStart=/home/robocon-2026/Desktop/RC2026/kvoy_quadruped/install/robot_bringup/lib/robot_bringup/kvoy_bringup_autostart.sh
+KillSignal=SIGINT
+TimeoutStopSec=10
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=default.target
