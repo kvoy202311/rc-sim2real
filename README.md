@@ -2,7 +2,6 @@
 
 `kvoy_quadruped` 是一个面向自制四足机器狗的 ROS 2 sim-to-real 工程。当前仓库已经具备完整上位机链路：手柄输入、IMU 读取、Jetson 与 MCU 串口通信、起立/趴下状态机、以及基于 TensorRT 的强化学习策略推理。
 
-这份 README 只描述当前仓库里真实存在的结构、脚本、配置和默认行为，不再保留过时的实现细节说明。
 
 ## 1. 当前工程概览
 
@@ -117,7 +116,7 @@ robot_fsm        -> /robot_state -> serial_comm + supervisor
 - D-pad 右长按：切换到下一个策略
 - D-pad 上下：仅当当前策略启用高度命令且速度命令接近零时，用于调节高度命令
 
-策略切换不是短按，而是长按触发。长按时长由 `gamepad_input_node.policy_switch_long_press_s` 控制。
+策略切换是长按触发。长按时长由 `gamepad_input_node.policy_switch_long_press_s` 控制。
 
 ## 6. 消息与单位
 
@@ -271,7 +270,7 @@ ros2 topic echo /robot_state
 - restart supervisor 参数
 - 启动提示音参数
 
-注意：当前默认串口路径使用的是 `/dev/serial/by-path/...`，不是旧文档中的 `/dev/serial/by-id/...`。
+注意：当前默认串口路径使用的是 `/dev/serial/by-path/...`。
 
 ### 10.2 `policies.yaml`
 
@@ -316,7 +315,7 @@ ros2 topic echo /robot_state
 - 多个 `.onnx`
 - 多个 `.engine`
 
-README 不再对每个模型做逐个解释，实际使用哪个模型由 `policies.yaml` 决定。
+实际使用哪个模型由 `policies.yaml` 决定。
 
 ### 11.2 导出与转换工具
 
@@ -392,7 +391,7 @@ README 不再对每个模型做逐个解释，实际使用哪个模型由 `polic
 
 ## 15. 适合先看的文件
 
-如果你要继续维护这个仓库，建议优先阅读：
+如果要维护这个仓库，建议优先阅读：
 
 - `src/robot_bringup/launch/bringup.launch.py`
 - `src/robot_bringup/config/robot_params.yaml`
